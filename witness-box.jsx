@@ -1,0 +1,1036 @@
+import { useState, useRef, useEffect } from "react";
+
+/* ---------------------------------------------------------------
+   Witness Box — examination trainer
+   You are counsel. The AI is the witness. It answers only from the
+   affidavit, and a supervising attorney marks your form in the margin.
+----------------------------------------------------------------- */
+
+const C = {
+  ink: "#191B18",
+  paper: "#F4F3E9",
+  paperEdge: "#DEDCCE",
+  rule: "#A8322C",
+  gutter: "#9A9A8B",
+  pen: "#2B4A6F",
+  brass: "#8A6A22",
+  bg: "#20221E",
+};
+
+const SAMPLE_CASE = `STATE OF MIDLANDS v. MORGAN REYES — arson, second degree.
+
+Copperline Kitchen, a 40-seat restaurant at 1120 Ferris Ave., burned in the early hours of March 3. Nobody was injured. The restaurant had lost money for eleven straight months. Its fire insurance was raised from $180,000 to $450,000 in September. The State says Reyes, the owner, set the fire. The defense says the building's 60-year-old wiring did, and that the State's investigator decided on arson before the lab report came back.`;
+
+const SAMPLE_WITNESSES = [
+  {
+    name: "Morgan Reyes",
+    role: "Defendant, owner of Copperline Kitchen",
+    affidavit: `I opened Copperline Kitchen four years ago. It did well until the Ferris Ave. bridge closed for repairs in April, and after that it never recovered. I raised the insurance in September because my broker, Tom Alvarez, told me the old policy would not cover a full rebuild at current construction prices. I did not think about fire when I signed it.
+
+On March 2 I closed at 8:15 p.m. and drove to my sister Elena's apartment on the west side. I stayed the night on her couch. I told Detective Hurst I left "around nine," because I was upset and I was guessing; the receipt from the register shows 8:15.
+
+Two days before the fire I bought two five-gallon gas cans at Ferris Hardware. The restaurant's backup generator runs on gasoline and it had been running dry during the storms. Dana Kroll saw me carrying them in and made a joke about it.
+
+I had a buyer. Priya Nandan offered $310,000 for the business on February 24. I was going to take it. I had no reason to burn down something someone was about to pay me for.`,
+  },
+  {
+    name: "Dana Kroll",
+    role: "General manager and part owner",
+    affidavit: `I managed Copperline Kitchen for three years and held a 20% stake. Morgan owed me $22,000 in deferred salary. After the fire, the insurance settled and I was paid in full.
+
+Two days before the fire I watched Morgan carry two red gas cans through the back door and set them in the dry storage room, not the generator shed. I said something like "planning a bonfire?" and Morgan did not laugh.
+
+In January Morgan told me, "Sometimes I think the only way out of this building is a match." I took it as a joke at the time. I did not mention it in my first interview with Detective Hurst on March 4. I remembered it before the second interview on April 11.
+
+I was not aware of any offer from Priya Nandan. Morgan never told me the restaurant was for sale, which I would have expected, given my stake.`,
+  },
+  {
+    name: "Sam Ortiz",
+    role: "State fire investigator",
+    affidavit: `I have been a fire investigator for six years and hold an IAAI certification I earned in 2023. I responded to 1120 Ferris Ave. at 4:40 a.m. on March 3.
+
+I found irregular low burn patterns on the dry storage floor consistent with a poured liquid accelerant, and the deepest charring away from the electrical panel. I concluded the origin was dry storage and the cause was incendiary. I put that in my preliminary report on March 5.
+
+The sprinkler system ran for roughly 20 minutes before the engine company arrived, and the floor was standing in water when I sampled it. The lab returned the samples on March 28. Two came back negative for ignitable liquid residue; one was inconclusive.
+
+The building was wired in 1961. I did not have the panel examined by an electrical engineer. I have ruled out electrical causes in 14 of the 16 fires I have investigated in that district.`,
+  },
+];
+
+const DEMEANORS = [
+  { id: "cooperative", label: "Cooperative", note: "answers plainly, volunteers a little" },
+  { id: "evasive", label: "Evasive", note: "qualifies, drifts, answers a nearby question" },
+  { id: "hostile", label: "Hostile", note: "fights the premise, corrects you, runs long" },
+];
+
+function buildSystem({ caseFacts, witness, role, affidavit, mode, demeanor, objections, hasPacket }) {
+  const dm = DEMEANORS.find((d) => d.id === demeanor);
+  const materials = hasPacket
+    ? `YOUR MATERIALS
+The attached PDF is the case packet. Find the affidavit belonging to ${witness} and treat it as your sworn statement. Other witnesses' affidavits are not yours: you know their contents only if your own affidavit says you do. The stipulations, exhibits, and case summary in the packet are shared knowledge and you may rely on them.`
+    : `CASE FILE
+${caseFacts}
+
+YOUR AFFIDAVIT (the only facts you know)
+${affidavit}`;
+
+  return `You are a witness in an AMTA round under the Midlands Rules of Evidence. Stay in character as ${witness}, ${role}. The user is the examining attorney conducting ${mode === "direct" ? "DIRECT examination — you were called by this attorney" : "CROSS-examination — this is opposing counsel"}.
+
+${materials}
+
+WITNESS CONDUCT UNDER AMTA RULES
+1. Invention of fact (AMTA Rulebook Rule 7.21) is the cardinal sin. Testify only to what your affidavit states or what follows as a reasonable inference from the case materials. Under the comment to MRE 402, nothing outside the materials is in evidence.
+2. Asked about something the affidavit doesn't cover: "I don't know" or "I don't recall." Never say "that's not in my affidavit" — that breaks character.
+3. Never deny a fact your affidavit states. A strategic "I don't know" about a stated fact is itself an invention and a sanctionable one.
+4. Immaterial color (weather, what you wore, how far away you stood) is permissible if pressed and if it changes nothing.
+5. On cross: answer the question and stop. One word where one word does it. Never volunteer, never explain unless the question asks you to.
+6. On direct: one to four sentences, responsive to the question asked. Don't run ahead of counsel.
+7. Demeanor: ${dm.label.toUpperCase()} — ${dm.note}.
+8. Speak only as the witness. No stage directions, no narration, no meta-commentary.
+
+RULING ON FORM
+Rule on the attorney's question as an AMTA presiding judge would. Flag it only when a real objection lies. The calls available, with their Midlands rules:
+Leading (MRE 611(c)) — ${mode === "cross" ? "PROPER on cross. Do not flag it." : "improper on direct except on preliminary or undisputed matters; flag it."}
+Unfair extrapolation (MRE 402/403 comment) — the question calls for facts the case materials don't supply and can't reasonably yield.
+Hearsay (MRE 802), speculation or no personal knowledge (MRE 602), improper lay opinion (MRE 701), relevance (MRE 401, 402), MRE 403, character (MRE 404, 405), specific instances of conduct (MRE 608(b)), convictions (MRE 609), improper impeachment (MRE 613), foundation or authentication (MRE 901), and under MRE 611(a): compound, narrative, argumentative, asked and answered, assumes facts not in evidence, misstates the evidence, badgering.
+Do NOT call beyond the scope (MRE 611(b)) — no direct preceded this practice examination, so scope can't be measured.
+${objections ? "" : "Set objection to null regardless of form; opposing counsel is silent this round."}
+
+Set outside_affidavit to true whenever your honest answer had to be "I don't know" because the materials don't reach the question. That is not always the attorney's error, but they should see it.
+
+COACHING
+One line on craft, not rules. Draw on what AMTA judges actually score: control of the witness, one fact per question, whether they used commit-credit-confront before impeaching, whether they asked a question they didn't know the answer to, whether they looped the last answer, whether they let you explain, whether they left an impeachment opening on the table.
+
+OUTPUT
+Return ONLY a JSON object, no markdown fences, no preamble:
+{"answer": "<what the witness says>", "objection": null or {"call": "<short name>", "rule": "<e.g. MRE 611(c)>", "why": "<one sentence>", "ruling": "sustained" or "overruled"}, "coaching": "<one line, max 22 words>", "grade": "clean" | "loose" | "bad", "outside_affidavit": true or false}`;
+}
+
+const SCAN_PROMPT = `This is a mock trial case packet. List every witness whose affidavit or sworn statement appears in it. Return ONLY a JSON array, no fences, no preamble, max 8 entries:
+[{"name": "<witness name as written>", "role": "<their role in the case, under 10 words>", "side": "<plaintiff/prosecution, defense, or unclear>"}]`;
+
+async function fileToBase64(file) {
+  return new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(String(r.result).split(",")[1]);
+    r.onerror = () => rej(new Error("Couldn't read that file"));
+    r.readAsDataURL(file);
+  });
+}
+
+function withDocs(messages, packets) {
+  if (!packets.length) return messages;
+  const [first, ...rest] = messages;
+  const docs = packets.map((p) => ({
+    type: "document",
+    source: { type: "base64", media_type: "application/pdf", data: p.data },
+  }));
+  return [
+    { role: "user", content: [...docs, { type: "text", text: first.content }] },
+    ...rest,
+  ];
+}
+
+function stripFences(t) {
+  return t.replace(/```json/g, "").replace(/```/g, "").trim();
+}
+
+async function callClaude(system, messages) {
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: "claude-sonnet-4-6",
+      max_tokens: 1000,
+      system,
+      messages,
+    }),
+  });
+  const data = await res.json();
+  if (data.error) throw new Error(data.error.message || "API error");
+  return data.content
+    .map((b) => (b.type === "text" ? b.text : ""))
+    .filter(Boolean)
+    .join("\n");
+}
+
+/* ------------------------- voice ------------------------- */
+
+const SR =
+  typeof window !== "undefined"
+    ? window.SpeechRecognition || window.webkitSpeechRecognition
+    : null;
+
+function chooseVoices() {
+  const all = window.speechSynthesis?.getVoices?.() || [];
+  const en = all.filter((v) => v.lang && v.lang.toLowerCase().startsWith("en"));
+  const pick = (re, fallback) => en.find((v) => re.test(v.name)) || fallback || en[0] || null;
+  const witness = pick(/samantha|zira|karen|aria|female|serena|moira/i, en[0]);
+  const court = pick(/daniel|david|alex|fred|male|arthur|oliver/i, en[1]) || witness;
+  return { witness, court };
+}
+
+function say(text, voice, rate, onDone) {
+  if (!text || typeof window === "undefined" || !window.speechSynthesis) {
+    onDone?.();
+    return;
+  }
+  const u = new SpeechSynthesisUtterance(text);
+  if (voice) u.voice = voice;
+  u.rate = rate || 1.02;
+  u.onend = () => onDone?.();
+  u.onerror = () => onDone?.();
+  window.speechSynthesis.speak(u);
+}
+
+function clock(s) {
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+export default function WitnessBox() {
+  const [phase, setPhase] = useState("setup");
+  const [caseFacts, setCaseFacts] = useState(SAMPLE_CASE);
+  const [witness, setWitness] = useState(SAMPLE_WITNESSES[1].name);
+  const [role, setRole] = useState(SAMPLE_WITNESSES[1].role);
+  const [affidavit, setAffidavit] = useState(SAMPLE_WITNESSES[1].affidavit);
+  const [mode, setMode] = useState("cross");
+  const [demeanor, setDemeanor] = useState("evasive");
+  const [objections, setObjections] = useState(true);
+
+  const [turns, setTurns] = useState([]);
+  const [q, setQ] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [debrief, setDebrief] = useState("");
+  const [debriefing, setDebriefing] = useState(false);
+  const endRef = useRef(null);
+
+  const [packets, setPackets] = useState([]);
+  const [scanning, setScanning] = useState(false);
+  const [found, setFound] = useState([]);
+  const [target, setTarget] = useState(180);
+
+  const [voiceOn, setVoiceOn] = useState(true);
+  const [listening, setListening] = useState(false);
+  const [speaking, setSpeaking] = useState(false);
+  const [heard, setHeard] = useState("");
+  const [micNote, setMicNote] = useState("");
+  const [seconds, setSeconds] = useState(0);
+  const [running, setRunning] = useState(false);
+  const recRef = useRef(null);
+  const heardRef = useRef("");
+  const voicesRef = useRef({ witness: null, court: null });
+  const askRef = useRef(null);
+
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [turns, busy, debrief]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.speechSynthesis) return;
+    const load = () => (voicesRef.current = chooseVoices());
+    load();
+    window.speechSynthesis.onvoiceschanged = load;
+    return () => {
+      window.speechSynthesis.onvoiceschanged = null;
+      window.speechSynthesis.cancel();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!running) return;
+    const t = setInterval(() => setSeconds((s) => s + 1), 1000);
+    return () => clearInterval(t);
+  }, [running]);
+
+  function hush() {
+    window.speechSynthesis?.cancel();
+    setSpeaking(false);
+  }
+
+  function startListening() {
+    if (!SR) {
+      setMicNote("This browser can't run speech recognition. Chrome or Edge can.");
+      return;
+    }
+    hush();
+    const rec = new SR();
+    rec.lang = "en-US";
+    rec.continuous = true;
+    rec.interimResults = true;
+    heardRef.current = "";
+    setHeard("");
+    setMicNote("");
+    rec.onresult = (e) => {
+      let txt = "";
+      for (let i = 0; i < e.results.length; i++) txt += e.results[i][0].transcript;
+      heardRef.current = txt;
+      setHeard(txt);
+    };
+    rec.onerror = (e) => {
+      setListening(false);
+      if (e.error === "not-allowed" || e.error === "service-not-allowed") {
+        setMicNote(
+          "The mic is blocked in this panel. Open the artifact in its own tab and allow the mic, or type the question."
+        );
+      } else if (e.error === "no-speech") {
+        setMicNote("Nothing came through.");
+      } else if (e.error === "network") {
+        setMicNote("Speech recognition lost the network.");
+      }
+    };
+    rec.onend = () => {
+      setListening(false);
+      const t = heardRef.current.trim();
+      setHeard("");
+      if (t) askRef.current?.(t);
+    };
+    recRef.current = rec;
+    try {
+      rec.start();
+      setListening(true);
+      if (!running) setRunning(true);
+    } catch {
+      setMicNote("The mic didn't open. Try again.");
+    }
+  }
+
+  function stopListening() {
+    try {
+      recRef.current?.stop();
+    } catch {
+      setListening(false);
+    }
+  }
+
+  const system = buildSystem({
+    caseFacts,
+    witness,
+    role,
+    affidavit,
+    mode,
+    demeanor,
+    objections,
+    hasPacket: packets.length > 0,
+  });
+
+  function loadWitness(w) {
+    setWitness(w.name);
+    setRole(w.role);
+    setAffidavit(w.affidavit || "");
+  }
+
+  async function addPackets(fileList) {
+    const files = Array.from(fileList || []).filter((f) => f.type === "application/pdf");
+    if (!files.length) {
+      setErr("PDFs only.");
+      return;
+    }
+    setErr("");
+    const loaded = [];
+    for (const f of files.slice(0, 3)) {
+      if (f.size > 12 * 1024 * 1024) {
+        setErr(`${f.name} is too large. Split the packet or upload the affidavits alone.`);
+        continue;
+      }
+      try {
+        loaded.push({ name: f.name, data: await fileToBase64(f) });
+      } catch {
+        setErr(`Couldn't read ${f.name}.`);
+      }
+    }
+    if (!loaded.length) return;
+    const next = [...packets, ...loaded].slice(0, 3);
+    setPackets(next);
+    scanPackets(next);
+  }
+
+  async function scanPackets(next) {
+    setScanning(true);
+    setErr("");
+    try {
+      const out = await callClaude(
+        "You read mock trial case packets and return JSON only.",
+        withDocs([{ role: "user", content: SCAN_PROMPT }], next)
+      );
+      const list = JSON.parse(stripFences(out));
+      setFound(Array.isArray(list) ? list : []);
+      if (Array.isArray(list) && list.length) {
+        setWitness(list[0].name);
+        setRole(list[0].role || "");
+        setAffidavit("");
+      }
+    } catch {
+      setErr("Couldn't read the witnesses out of that packet. Type the name and role yourself.");
+    }
+    setScanning(false);
+  }
+
+  function dropPacket(i) {
+    const next = packets.filter((_, j) => j !== i);
+    setPackets(next);
+    if (!next.length) setFound([]);
+  }
+
+  async function ask(override) {
+    const spoken = typeof override === "string";
+    const text = (spoken ? override : q).trim();
+    if (!text || busy) return;
+    if (!spoken) setQ("");
+    setErr("");
+    setBusy(true);
+    if (!running) setRunning(true);
+    const history = [];
+    turns.forEach((t) => {
+      history.push({ role: "user", content: t.q });
+      history.push({ role: "assistant", content: t.raw });
+    });
+    history.push({ role: "user", content: text });
+    try {
+      const out = await callClaude(system, withDocs(history, packets));
+      let parsed;
+      try {
+        parsed = JSON.parse(stripFences(out));
+      } catch {
+        parsed = { answer: stripFences(out), objection: null, coaching: "", grade: "clean" };
+      }
+      setTurns((prev) => [
+        ...prev,
+        {
+          q: text,
+          raw: out,
+          answer: parsed.answer || "",
+          objection: objections ? parsed.objection : null,
+          coaching: parsed.coaching || "",
+          grade: parsed.grade || "clean",
+          outside: !!parsed.outside_affidavit,
+          revealed: false,
+        },
+      ]);
+      const obj = objections ? parsed.objection : null;
+      if (voiceOn) {
+        setSpeaking(true);
+        if (obj) {
+          say(
+            `Objection. ${obj.call}.`,
+            voicesRef.current.court,
+            1.08,
+            () =>
+              say(
+                obj.ruling === "overruled" ? "Overruled. You may answer." : "Sustained.",
+                voicesRef.current.court,
+                0.95,
+                () => {
+                  if (obj.ruling === "overruled") {
+                    say(parsed.answer, voicesRef.current.witness, 1.02, () => setSpeaking(false));
+                  } else {
+                    setSpeaking(false);
+                  }
+                }
+              )
+          );
+        } else {
+          say(parsed.answer, voicesRef.current.witness, 1.02, () => setSpeaking(false));
+        }
+      }
+    } catch (e) {
+      setErr("The witness didn't respond. Ask again.");
+    }
+    setBusy(false);
+  }
+
+  async function runDebrief() {
+    if (!turns.length || debriefing) return;
+    setDebriefing(true);
+    setErr("");
+    const transcript = turns
+      .map((t, i) => `Q${i + 1}. ${t.q}\nA. ${t.objection ? "[objection: " + t.objection.call + "]" : t.answer}`)
+      .join("\n\n");
+    try {
+      const out = await callClaude(
+        `You are an AMTA coach reviewing an attorney's ${mode} examination of ${witness}. Be direct and specific. Quote the attorney's own questions when you critique them. No praise sandwiches, no summary paragraph at the end. Plain prose, no markdown headers or bullets. Under 220 words.
+
+Judge it the way an AMTA scoring judge would under the ballot criteria: control of the witness, question form under the Midlands Rules, whether the examination built toward a theory a closing could use, and whether they earned or wasted their time under Rule 5.4. End by naming the single best impeachment or admission they left on the table, citing the affidavit line that would have supported it.
+
+${packets.length ? "The witness's affidavit is in the attached packet." : "AFFIDAVIT\n" + affidavit}`,
+        withDocs([{ role: "user", content: transcript }], packets)
+      );
+      setDebrief(out);
+    } catch {
+      setErr("Debrief failed. Try again.");
+    }
+    setDebriefing(false);
+  }
+
+  function reveal(i) {
+    setTurns((prev) => prev.map((t, j) => (j === i ? { ...t, revealed: true } : t)));
+  }
+
+  function reset() {
+    hush();
+    stopListening();
+    setTurns([]);
+    setDebrief("");
+    setErr("");
+    setMicNote("");
+    setSeconds(0);
+    setRunning(false);
+    setPhase("setup");
+  }
+
+  askRef.current = ask;
+
+  const stats = {
+    asked: turns.length,
+    flagged: turns.filter((t) => t.objection).length,
+    outside: turns.filter((t) => t.outside).length,
+  };
+
+  /* ---------------- setup ---------------- */
+  if (phase === "setup") {
+    return (
+      <div className="min-h-screen w-full p-4 sm:p-8" style={{ background: C.bg, color: C.paper }}>
+        <div className="mx-auto max-w-3xl">
+          <p
+            className="text-xs uppercase tracking-widest"
+            style={{ color: C.gutter, letterSpacing: "0.25em" }}
+          >
+            Examination trainer
+          </p>
+          <h1 className="font-serif text-4xl sm:text-5xl mt-2" style={{ color: C.paper }}>
+            The Witness Box
+          </h1>
+          <p className="mt-3 max-w-xl text-sm leading-relaxed" style={{ color: "#B9B8AC" }}>
+            You ask the questions. The witness answers from the affidavit and nothing else. Opposing
+            counsel objects when your form deserves it, and a supervising attorney writes in the
+            margin.
+          </p>
+
+          <div className="mt-8 grid gap-5">
+            <div>
+              <Label>Case packet</Label>
+              <label
+                className="flex cursor-pointer items-center justify-between gap-3 rounded-sm px-4 py-4"
+                style={{ border: `1px dashed ${C.gutter}`, color: "#B9B8AC" }}
+              >
+                <span className="font-mono text-sm">
+                  {scanning
+                    ? "Reading the packet…"
+                    : "Upload the affidavits or the whole packet (PDF, up to 3)"}
+                </span>
+                <span
+                  className="rounded-sm px-3 py-2 font-serif text-sm"
+                  style={{ background: C.paper, color: C.ink }}
+                >
+                  Choose files
+                </span>
+                <input
+                  type="file"
+                  accept="application/pdf"
+                  multiple
+                  className="hidden"
+                  onChange={(e) => addPackets(e.target.files)}
+                />
+              </label>
+
+              {!!packets.length && (
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {packets.map((p, i) => (
+                    <span
+                      key={p.name + i}
+                      className="flex items-center gap-2 rounded-sm px-2 py-1 font-mono text-xs"
+                      style={{ background: "#2A2C26", color: "#B9B8AC" }}
+                    >
+                      {p.name}
+                      <button onClick={() => dropPacket(i)} style={{ color: C.rule }}>
+                        ×
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
+
+              {!!found.length && (
+                <div className="mt-3">
+                  <Label>Witnesses in the packet</Label>
+                  <div className="flex flex-wrap gap-2">
+                    {found.map((w) => (
+                      <button
+                        key={w.name}
+                        onClick={() => {
+                          setWitness(w.name);
+                          setRole(w.role || "");
+                          setAffidavit("");
+                        }}
+                        className="rounded-sm px-3 py-2 text-left text-xs font-mono"
+                        style={{
+                          background: witness === w.name ? C.rule : "transparent",
+                          color: witness === w.name ? C.paper : "#B9B8AC",
+                          border: `1px solid ${witness === w.name ? C.rule : "#3B3D37"}`,
+                        }}
+                      >
+                        {w.name}
+                        {w.side && w.side !== "unclear" && (
+                          <span className="ml-2" style={{ opacity: 0.7 }}>
+                            {w.side}
+                          </span>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="mt-2 text-xs" style={{ color: C.gutter }}>
+                    The witness reads its own affidavit straight from the packet. Leave the affidavit
+                    box empty.
+                  </p>
+                </div>
+              )}
+            </div>
+
+            {!packets.length && (
+              <Field label="Case file">
+                <textarea
+                  value={caseFacts}
+                  onChange={(e) => setCaseFacts(e.target.value)}
+                  rows={5}
+                  className="w-full rounded-sm p-3 text-sm font-mono leading-relaxed"
+                  style={{ background: C.paper, color: C.ink, border: `1px solid ${C.paperEdge}` }}
+                />
+              </Field>
+            )}
+
+            <div>
+              <Label>{packets.length ? "Or use a sample witness instead" : "Load a sample witness"}</Label>
+              <div className="flex flex-wrap gap-2">
+                {SAMPLE_WITNESSES.map((w) => (
+                  <button
+                    key={w.name}
+                    onClick={() => loadWitness(w)}
+                    className="rounded-sm px-3 py-2 text-xs font-mono transition-colors"
+                    style={{
+                      background: witness === w.name ? C.rule : "transparent",
+                      color: witness === w.name ? C.paper : "#B9B8AC",
+                      border: `1px solid ${witness === w.name ? C.rule : "#3B3D37"}`,
+                    }}
+                  >
+                    {w.name}
+                  </button>
+                ))}
+              </div>
+              <p className="mt-2 text-xs" style={{ color: C.gutter }}>
+                Or paste your own case packet into the fields.
+              </p>
+            </div>
+
+            <div className="grid gap-5 sm:grid-cols-2">
+              <Field label="Witness name">
+                <input
+                  value={witness}
+                  onChange={(e) => setWitness(e.target.value)}
+                  className="w-full rounded-sm p-3 text-sm font-mono"
+                  style={{ background: C.paper, color: C.ink, border: `1px solid ${C.paperEdge}` }}
+                />
+              </Field>
+              <Field label="Role in the case">
+                <input
+                  value={role}
+                  onChange={(e) => setRole(e.target.value)}
+                  className="w-full rounded-sm p-3 text-sm font-mono"
+                  style={{ background: C.paper, color: C.ink, border: `1px solid ${C.paperEdge}` }}
+                />
+              </Field>
+            </div>
+
+            {!packets.length && (
+              <Field label="Affidavit">
+                <textarea
+                  value={affidavit}
+                  onChange={(e) => setAffidavit(e.target.value)}
+                  rows={9}
+                  className="w-full rounded-sm p-3 text-sm font-mono leading-relaxed"
+                  style={{ background: C.paper, color: C.ink, border: `1px solid ${C.paperEdge}` }}
+                />
+              </Field>
+            )}
+
+            <div>
+              <Label>Clock</Label>
+              <Toggle
+                options={[
+                  { id: 180, label: "3:00 tryout" },
+                  { id: 480, label: "8:00 one witness" },
+                  { id: 1500, label: "25:00 AMTA block" },
+                ]}
+                value={target}
+                onChange={setTarget}
+              />
+              <p className="mt-2 text-xs" style={{ color: C.gutter }}>
+                Rule 5.4 gives each side 25 minutes for all three directs and 25 for all three
+                crosses.
+              </p>
+            </div>
+
+            <div className="grid gap-5 sm:grid-cols-2">
+              <div>
+                <Label>Examination</Label>
+                <Toggle
+                  options={[
+                    { id: "direct", label: "Direct" },
+                    { id: "cross", label: "Cross" },
+                  ]}
+                  value={mode}
+                  onChange={setMode}
+                />
+              </div>
+              <div>
+                <Label>Witness demeanor</Label>
+                <Toggle
+                  options={DEMEANORS.map((d) => ({ id: d.id, label: d.label }))}
+                  value={demeanor}
+                  onChange={setDemeanor}
+                />
+              </div>
+            </div>
+
+            <div className="grid gap-3">
+              <label className="flex items-center gap-3 text-sm" style={{ color: "#B9B8AC" }}>
+                <input
+                  type="checkbox"
+                  checked={objections}
+                  onChange={(e) => setObjections(e.target.checked)}
+                />
+                Opposing counsel objects to bad form
+              </label>
+              <label className="flex items-center gap-3 text-sm" style={{ color: "#B9B8AC" }}>
+                <input
+                  type="checkbox"
+                  checked={voiceOn}
+                  onChange={(e) => setVoiceOn(e.target.checked)}
+                />
+                Speak out loud, and let me answer you out loud
+              </label>
+              {voiceOn && (
+                <p className="text-xs font-mono" style={{ color: C.gutter }}>
+                  {SR
+                    ? "Chrome and Edge only. The mic needs permission the first time you click Speak."
+                    : "This browser won't do speech-to-text, so you'll type and I'll answer out loud."}
+                </p>
+              )}
+            </div>
+
+            <button
+              onClick={() => setPhase("exam")}
+              disabled={!witness.trim() || (!affidavit.trim() && !packets.length)}
+              className="mt-2 self-start rounded-sm px-6 py-3 font-serif text-lg disabled:opacity-40"
+              style={{ background: C.rule, color: C.paper }}
+            >
+              Call the witness
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  /* ---------------- examination ---------------- */
+  let line = 0;
+  const rows = [];
+  turns.forEach((t, i) => {
+    rows.push({ kind: "q", text: t.q, i, grade: t.grade, coaching: t.coaching, outside: t.outside });
+    if (t.objection) {
+      rows.push({ kind: "obj", obj: t.objection, i, revealed: t.revealed, answer: t.answer });
+      if (t.revealed) rows.push({ kind: "a", text: t.answer, muted: true, i });
+    } else {
+      rows.push({ kind: "a", text: t.answer, i });
+    }
+  });
+
+  return (
+    <div className="min-h-screen w-full" style={{ background: C.bg, color: C.paper }}>
+      <div className="mx-auto max-w-5xl px-3 py-4 sm:px-6 sm:py-6">
+        <div className="flex flex-wrap items-baseline justify-between gap-3 pb-4">
+          <div>
+            <p className="font-serif text-2xl">{witness}</p>
+            <p className="text-xs font-mono" style={{ color: C.gutter }}>
+              {mode === "cross" ? "Cross-examination" : "Direct examination"} · {demeanor} ·{" "}
+              {stats.asked} asked, {stats.flagged} flagged, {stats.outside} off the record
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              onClick={() => setRunning((r) => !r)}
+              className="rounded-sm px-3 py-2 font-mono text-sm tabular-nums"
+              title="Round clock"
+              style={{
+                border: `1px solid ${seconds > target ? C.rule : "#3B3D37"}`,
+                color: seconds > target ? C.rule : running ? C.paper : "#B9B8AC",
+              }}
+            >
+              {clock(seconds)} / {clock(target)}
+            </button>
+            <button
+              onClick={() => {
+                if (voiceOn) hush();
+                setVoiceOn((v) => !v);
+              }}
+              className="rounded-sm px-3 py-2 text-xs font-mono"
+              style={{
+                border: `1px solid ${voiceOn ? C.brass : "#3B3D37"}`,
+                color: voiceOn ? C.brass : "#B9B8AC",
+              }}
+            >
+              {voiceOn ? "Voice on" : "Voice off"}
+            </button>
+            <button
+              onClick={runDebrief}
+              disabled={!turns.length || debriefing}
+              className="rounded-sm px-3 py-2 text-xs font-mono disabled:opacity-40"
+              style={{ border: `1px solid ${C.brass}`, color: C.brass }}
+            >
+              {debriefing ? "Reviewing…" : "Pass the witness"}
+            </button>
+            <button
+              onClick={reset}
+              className="rounded-sm px-3 py-2 text-xs font-mono"
+              style={{ border: "1px solid #3B3D37", color: "#B9B8AC" }}
+            >
+              New witness
+            </button>
+          </div>
+        </div>
+
+        {/* pleading paper */}
+        <div
+          className="relative rounded-sm"
+          style={{ background: C.paper, color: C.ink, border: `1px solid ${C.paperEdge}` }}
+        >
+          <div
+            className="absolute top-0 bottom-0 hidden sm:block"
+            style={{ left: "3.25rem", width: "1px", background: C.rule, opacity: 0.55 }}
+          />
+          <div className="px-3 py-5 sm:px-6">
+            {!rows.length && (
+              <p className="font-mono text-sm sm:ml-12" style={{ color: C.gutter }}>
+                The witness is sworn and seated. Begin.
+              </p>
+            )}
+
+            {rows.map((r, idx) => {
+              line += 1;
+              return (
+                <div key={idx} className="flex gap-3 py-1">
+                  <span
+                    className="hidden w-8 shrink-0 pt-1 text-right font-mono text-xs sm:block"
+                    style={{ color: C.gutter }}
+                  >
+                    {line}
+                  </span>
+                  <div className="min-w-0 flex-1 sm:pl-6">
+                    {r.kind === "q" && (
+                      <div className="sm:flex sm:gap-4">
+                        <p className="font-mono text-sm leading-relaxed sm:flex-1">
+                          <span style={{ color: C.rule }}>Q.&nbsp;</span>
+                          {r.text}
+                        </p>
+                        {(r.coaching || r.outside) && (
+                          <div className="mt-1 sm:mt-0 sm:w-48 sm:shrink-0">
+                            {r.outside && (
+                              <p
+                                className="font-mono text-xs uppercase"
+                                style={{ color: C.brass, letterSpacing: "0.1em" }}
+                              >
+                                No affidavit support
+                              </p>
+                            )}
+                            {r.coaching && (
+                              <p className="font-serif text-xs italic leading-snug" style={{ color: C.pen }}>
+                                {r.coaching}
+                              </p>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {r.kind === "a" && (
+                      <p
+                        className="font-mono text-sm leading-relaxed"
+                        style={{ opacity: r.muted ? 0.5 : 1 }}
+                      >
+                        <span style={{ color: C.gutter }}>A.&nbsp;</span>
+                        {r.text}
+                      </p>
+                    )}
+
+                    {r.kind === "obj" && (
+                      <div
+                        className="rounded-sm px-3 py-2"
+                        style={{ background: "#F0E3E1", border: `1px solid ${C.rule}` }}
+                      >
+                        <p className="font-mono text-sm" style={{ color: C.rule }}>
+                          Objection — {r.obj.call}
+                          {r.obj.rule ? `, ${r.obj.rule}` : ""}.{" "}
+                          {r.obj.ruling === "overruled" ? "Overruled." : "Sustained."}
+                        </p>
+                        <p className="mt-1 font-mono text-xs" style={{ color: C.ink }}>
+                          {r.obj.why}
+                        </p>
+                        {r.obj.ruling !== "overruled" && !r.revealed && (
+                          <button
+                            onClick={() => reveal(r.i)}
+                            className="mt-2 font-mono text-xs underline"
+                            style={{ color: C.pen }}
+                          >
+                            Show the answer you didn't get
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+
+            {busy && (
+              <p className="py-2 font-mono text-sm sm:ml-12" style={{ color: C.gutter }}>
+                A. …
+              </p>
+            )}
+            <div ref={endRef} />
+          </div>
+        </div>
+
+        {err && (
+          <p className="mt-3 font-mono text-xs" style={{ color: C.rule }}>
+            {err}
+          </p>
+        )}
+
+        {debrief && (
+          <div
+            className="mt-5 rounded-sm p-4 sm:p-6"
+            style={{ background: "#26281F", border: `1px solid ${C.brass}` }}
+          >
+            <p
+              className="mb-2 text-xs uppercase"
+              style={{ color: C.brass, letterSpacing: "0.25em" }}
+            >
+              Coach's notes
+            </p>
+            <p className="whitespace-pre-wrap font-serif text-sm leading-relaxed" style={{ color: C.paper }}>
+              {debrief}
+            </p>
+          </div>
+        )}
+
+        <div className="sticky bottom-0 mt-4 pb-4" style={{ background: C.bg }}>
+          {listening && (
+            <div
+              className="mb-2 rounded-sm px-3 py-2 font-mono text-sm"
+              style={{ background: C.paper, color: C.ink, border: `1px solid ${C.rule}` }}
+            >
+              <span style={{ color: C.rule }}>Q.&nbsp;</span>
+              {heard || <span style={{ color: C.gutter }}>listening…</span>}
+            </div>
+          )}
+
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              onClick={listening ? stopListening : startListening}
+              disabled={busy}
+              className="rounded-sm px-5 py-3 font-serif text-lg disabled:opacity-40"
+              style={{
+                background: listening ? C.paper : C.rule,
+                color: listening ? C.rule : C.paper,
+                border: `1px solid ${C.rule}`,
+              }}
+            >
+              {listening ? "Done — put it to the witness" : "Speak"}
+            </button>
+
+            {speaking && (
+              <button
+                onClick={hush}
+                className="rounded-sm px-3 py-3 text-xs font-mono"
+                style={{ border: `1px solid ${C.brass}`, color: C.brass }}
+              >
+                Cut the witness off
+              </button>
+            )}
+
+            <div className="flex min-w-0 flex-1 items-center gap-2">
+              <span className="font-mono text-sm" style={{ color: C.gutter }}>
+                or
+              </span>
+              <textarea
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    ask();
+                  }
+                }}
+                rows={1}
+                placeholder="type the question"
+                className="min-w-0 flex-1 resize-none rounded-sm p-3 font-mono text-sm"
+                style={{ background: C.paper, color: C.ink, border: `1px solid ${C.paperEdge}` }}
+              />
+              <button
+                onClick={() => ask()}
+                disabled={busy || !q.trim()}
+                className="rounded-sm px-4 py-3 font-serif disabled:opacity-40"
+                style={{ background: C.rule, color: C.paper }}
+              >
+                Ask
+              </button>
+            </div>
+          </div>
+
+          {micNote && (
+            <p className="mt-2 font-mono text-xs" style={{ color: C.brass }}>
+              {micNote}
+            </p>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Label({ children }) {
+  return (
+    <p className="mb-2 text-xs uppercase" style={{ color: C.gutter, letterSpacing: "0.2em" }}>
+      {children}
+    </p>
+  );
+}
+
+function Field({ label, children }) {
+  return (
+    <div>
+      <Label>{label}</Label>
+      {children}
+    </div>
+  );
+}
+
+function Toggle({ options, value, onChange }) {
+  return (
+    <div className="flex flex-wrap gap-2">
+      {options.map((o) => (
+        <button
+          key={o.id}
+          onClick={() => onChange(o.id)}
+          className="rounded-sm px-3 py-2 text-xs font-mono"
+          style={{
+            background: value === o.id ? C.paper : "transparent",
+            color: value === o.id ? C.ink : "#B9B8AC",
+            border: `1px solid ${value === o.id ? C.paper : "#3B3D37"}`,
+          }}
+        >
+          {o.label}
+        </button>
+      ))}
+    </div>
+  );
+}
